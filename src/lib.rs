@@ -1,0 +1,311 @@
+//! Cache-conscious graph data structures.
+
+use core::fmt;
+
+/// Stable identifier for a node in a [`Graph`].
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NodeId(u32);
+
+impl NodeId {
+    /// Creates a node identifier from a zero-based index.
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Returns this identifier as a zero-based `usize` index.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Returns this identifier as its compact `u32` representation.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// A directed, immutable graph stored in compressed sparse row form.
+///
+/// Nodes are stored contiguously, and each node owns one contiguous range of
+/// outgoing edges. This keeps full scans and neighbor traversal cache-friendly
+/// compared to pointer-heavy graph layouts.
+#[derive(Clone, Debug)]
+pub struct Graph<N, E> {
+    nodes: Vec<Node<N>>,
+    edges: Vec<Edge<E>>,
+}
+
+#[derive(Clone, Debug)]
+struct Node<N> {
+    data: N,
+    first_edge: u32,
+    edge_count: u32,
+}
+
+#[derive(Clone, Debug)]
+struct Edge<E> {
+    target: NodeId,
+    data: E,
+}
+
+/// Borrowed view of one outgoing edge.
+#[derive(Clone, Copy, Debug)]
+pub struct EdgeRef<'a, E> {
+    target: NodeId,
+    data: &'a E,
+}
+
+impl<'a, E> EdgeRef<'a, E> {
+    /// Returns the edge target.
+    pub const fn target(self) -> NodeId {
+        self.target
+    }
+
+    /// Returns the edge payload.
+    pub const fn data(self) -> &'a E {
+        self.data
+    }
+}
+
+/// Iterator over the outgoing edges for a node.
+#[derive(Clone, Debug)]
+pub struct Edges<'a, E> {
+    inner: core::slice::Iter<'a, Edge<E>>,
+}
+
+impl<'a, E> Iterator for Edges<'a, E> {
+    type Item = EdgeRef<'a, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|edge| EdgeRef {
+            target: edge.target,
+            data: &edge.data,
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<E> ExactSizeIterator for Edges<'_, E> {}
+
+/// Error returned when compact graph construction fails.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BuildError {
+    /// More than `u32::MAX` nodes were provided.
+    TooManyNodes { count: usize },
+    /// More than `u32::MAX` edges were provided.
+    TooManyEdges { count: usize },
+    /// An edge references a node that does not exist in the graph.
+    InvalidNodeId { id: NodeId, node_count: usize },
+}
+
+impl fmt::Display for BuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooManyNodes { count } => {
+                write!(f, "graph has {count} nodes, exceeding u32::MAX")
+            }
+            Self::TooManyEdges { count } => {
+                write!(f, "graph has {count} edges, exceeding u32::MAX")
+            }
+            Self::InvalidNodeId { id, node_count } => {
+                write!(
+                    f,
+                    "node id {} is out of bounds for {node_count} nodes",
+                    id.as_u32()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BuildError {}
+
+impl<N, E> Graph<N, E> {
+    /// Builds an immutable directed graph from node payloads and directed edges.
+    ///
+    /// The input edges are `(source, target, payload)` triples. The resulting
+    /// graph groups outgoing edges by source node into contiguous ranges.
+    pub fn from_edges(
+        nodes: Vec<N>,
+        edges: impl IntoIterator<Item = (NodeId, NodeId, E)>,
+    ) -> Result<Self, BuildError> {
+        if nodes.len() > u32::MAX as usize {
+            return Err(BuildError::TooManyNodes { count: nodes.len() });
+        }
+
+        let node_count = nodes.len();
+        let mut edges: Vec<_> = edges.into_iter().collect();
+
+        if edges.len() > u32::MAX as usize {
+            return Err(BuildError::TooManyEdges { count: edges.len() });
+        }
+
+        for (source, target, _) in &edges {
+            validate_node_id(*source, node_count)?;
+            validate_node_id(*target, node_count)?;
+        }
+
+        edges.sort_by_key(|(source, _, _)| *source);
+
+        let mut graph_nodes: Vec<_> = nodes
+            .into_iter()
+            .map(|data| Node {
+                data,
+                first_edge: 0,
+                edge_count: 0,
+            })
+            .collect();
+        let mut graph_edges = Vec::with_capacity(edges.len());
+
+        for (source, target, data) in edges {
+            let source_index = source.index();
+            let node = &mut graph_nodes[source_index];
+
+            if node.edge_count == 0 {
+                node.first_edge = graph_edges.len() as u32;
+            }
+
+            node.edge_count += 1;
+            graph_edges.push(Edge { target, data });
+        }
+
+        Ok(Self {
+            nodes: graph_nodes,
+            edges: graph_edges,
+        })
+    }
+
+    /// Returns the number of nodes in the graph.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Returns the number of edges in the graph.
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Returns true when the graph has no nodes.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Returns the node payload for `id`, or `None` if the ID is out of bounds.
+    pub fn node_data(&self, id: NodeId) -> Option<&N> {
+        self.nodes.get(id.index()).map(|node| &node.data)
+    }
+
+    /// Returns outgoing edges for `source`, or `None` if the ID is out of bounds.
+    pub fn edges_from(&self, source: NodeId) -> Option<Edges<'_, E>> {
+        let node = self.nodes.get(source.index())?;
+        let start = node.first_edge as usize;
+        let end = start + node.edge_count as usize;
+
+        Some(Edges {
+            inner: self.edges[start..end].iter(),
+        })
+    }
+
+    /// Returns the out-degree for `source`, or `None` if the ID is out of bounds.
+    pub fn out_degree(&self, source: NodeId) -> Option<usize> {
+        self.nodes
+            .get(source.index())
+            .map(|node| node.edge_count as usize)
+    }
+}
+
+fn validate_node_id(id: NodeId, node_count: usize) -> Result<(), BuildError> {
+    if id.index() < node_count {
+        Ok(())
+    } else {
+        Err(BuildError::InvalidNodeId { id, node_count })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_edges_should_store_nodes_and_edges() {
+        let graph = Graph::from_edges(
+            vec!["a", "b", "c"],
+            [
+                (NodeId::new(0), NodeId::new(1), 10),
+                (NodeId::new(0), NodeId::new(2), 20),
+                (NodeId::new(2), NodeId::new(0), 30),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 3);
+        assert_eq!(graph.node_data(NodeId::new(1)), Some(&"b"));
+    }
+
+    #[test]
+    fn edges_from_should_return_contiguous_outgoing_edges() {
+        let graph = Graph::from_edges(
+            vec![(), (), ()],
+            [
+                (NodeId::new(2), NodeId::new(0), "c-a"),
+                (NodeId::new(0), NodeId::new(1), "a-b"),
+                (NodeId::new(0), NodeId::new(2), "a-c"),
+            ],
+        )
+        .unwrap();
+
+        let edges: Vec<_> = graph
+            .edges_from(NodeId::new(0))
+            .unwrap()
+            .map(|edge| (edge.target(), *edge.data()))
+            .collect();
+
+        assert_eq!(edges, [(NodeId::new(1), "a-b"), (NodeId::new(2), "a-c")]);
+    }
+
+    #[test]
+    fn empty_outgoing_range_should_be_supported() {
+        let graph = Graph::<_, ()>::from_edges(vec!["a", "b"], []).unwrap();
+
+        assert_eq!(graph.out_degree(NodeId::new(1)), Some(0));
+        assert_eq!(graph.edges_from(NodeId::new(1)).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn from_edges_should_reject_invalid_sources() {
+        let err = Graph::from_edges(vec![()], [(NodeId::new(1), NodeId::new(0), ())]).unwrap_err();
+
+        assert_eq!(
+            err,
+            BuildError::InvalidNodeId {
+                id: NodeId::new(1),
+                node_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn from_edges_should_reject_invalid_targets() {
+        let err = Graph::from_edges(vec![()], [(NodeId::new(0), NodeId::new(1), ())]).unwrap_err();
+
+        assert_eq!(
+            err,
+            BuildError::InvalidNodeId {
+                id: NodeId::new(1),
+                node_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn accessors_should_return_none_for_invalid_node_ids() {
+        let graph = Graph::<_, ()>::from_edges(vec!["a"], []).unwrap();
+
+        assert_eq!(graph.node_data(NodeId::new(2)), None);
+        assert!(graph.edges_from(NodeId::new(2)).is_none());
+        assert_eq!(graph.out_degree(NodeId::new(2)), None);
+    }
+}
