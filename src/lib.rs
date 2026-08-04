@@ -122,7 +122,90 @@ impl fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
+/// Mutable builder for an immutable [`Graph`].
+///
+/// The builder accepts nodes and directed edges in insertion order. Calling
+/// [`build`](Self::build) consumes the builder and compacts the data into the
+/// graph's CSR layout.
+#[derive(Clone, Debug)]
+pub struct GraphBuilder<N, E> {
+    nodes: Vec<N>,
+    edges: Vec<(NodeId, NodeId, E)>,
+}
+
+impl<N, E> GraphBuilder<N, E> {
+    /// Creates an empty graph builder.
+    pub const fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    /// Creates an empty graph builder with storage reserved up front.
+    pub fn with_capacity(nodes: usize, edges: usize) -> Self {
+        Self {
+            nodes: Vec::with_capacity(nodes),
+            edges: Vec::with_capacity(edges),
+        }
+    }
+
+    /// Adds a node payload and returns its stable node ID.
+    pub fn add_node(&mut self, data: N) -> Result<NodeId, BuildError> {
+        if self.nodes.len() == u32::MAX as usize {
+            return Err(BuildError::TooManyNodes {
+                count: self.nodes.len() + 1,
+            });
+        }
+
+        let id = NodeId::new(self.nodes.len() as u32);
+        self.nodes.push(data);
+        Ok(id)
+    }
+
+    /// Adds a directed edge from `source` to `target`.
+    pub fn add_edge(&mut self, source: NodeId, target: NodeId, data: E) -> Result<(), BuildError> {
+        validate_node_id(source, self.nodes.len())?;
+        validate_node_id(target, self.nodes.len())?;
+
+        if self.edges.len() == u32::MAX as usize {
+            return Err(BuildError::TooManyEdges {
+                count: self.edges.len() + 1,
+            });
+        }
+
+        self.edges.push((source, target, data));
+        Ok(())
+    }
+
+    /// Returns the number of nodes currently held by the builder.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Returns the number of edges currently held by the builder.
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Consumes the builder and returns a compact immutable graph.
+    pub fn build(self) -> Result<Graph<N, E>, BuildError> {
+        Graph::from_edges(self.nodes, self.edges)
+    }
+}
+
+impl<N, E> Default for GraphBuilder<N, E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<N, E> Graph<N, E> {
+    /// Creates an empty mutable builder for this graph type.
+    pub const fn builder() -> GraphBuilder<N, E> {
+        GraphBuilder::new()
+    }
+
     /// Builds an immutable directed graph from node payloads and directed edges.
     ///
     /// The input edges are `(source, target, payload)` triples. The resulting
@@ -307,5 +390,64 @@ mod tests {
         assert_eq!(graph.node_data(NodeId::new(2)), None);
         assert!(graph.edges_from(NodeId::new(2)).is_none());
         assert_eq!(graph.out_degree(NodeId::new(2)), None);
+    }
+
+    #[test]
+    fn builder_should_build_compact_graph() {
+        let mut builder = GraphBuilder::new();
+        let a = builder.add_node("a").unwrap();
+        let b = builder.add_node("b").unwrap();
+        let c = builder.add_node("c").unwrap();
+
+        builder.add_edge(a, b, 10).unwrap();
+        builder.add_edge(a, c, 20).unwrap();
+
+        let graph = builder.build().unwrap();
+        let edges: Vec<_> = graph
+            .edges_from(a)
+            .unwrap()
+            .map(|edge| (edge.target(), *edge.data()))
+            .collect();
+
+        assert_eq!(edges, [(b, 10), (c, 20)]);
+    }
+
+    #[test]
+    fn builder_should_track_pending_counts() {
+        let mut builder = GraphBuilder::<_, ()>::with_capacity(2, 1);
+        let a = builder.add_node("a").unwrap();
+        let b = builder.add_node("b").unwrap();
+
+        builder.add_edge(a, b, ()).unwrap();
+
+        assert_eq!(builder.node_count(), 2);
+        assert_eq!(builder.edge_count(), 1);
+    }
+
+    #[test]
+    fn builder_should_reject_invalid_edges_before_build() {
+        let mut builder = GraphBuilder::new();
+        let a = builder.add_node("a").unwrap();
+
+        let err = builder.add_edge(a, NodeId::new(1), ()).unwrap_err();
+
+        assert_eq!(
+            err,
+            BuildError::InvalidNodeId {
+                id: NodeId::new(1),
+                node_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn graph_should_create_builder_for_matching_payload_types() {
+        let mut builder = Graph::<&str, i32>::builder();
+        let a = builder.add_node("a").unwrap();
+        let b = builder.add_node("b").unwrap();
+
+        builder.add_edge(a, b, 5).unwrap();
+
+        assert_eq!(builder.build().unwrap().edge_count(), 1);
     }
 }
