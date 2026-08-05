@@ -89,6 +89,26 @@ impl<'a, E> Iterator for Edges<'a, E> {
 
 impl<E> ExactSizeIterator for Edges<'_, E> {}
 
+/// Iterator over outgoing neighbor node IDs.
+#[derive(Clone, Debug)]
+pub struct Neighbors<'a, E> {
+    inner: core::slice::Iter<'a, Edge<E>>,
+}
+
+impl<E> Iterator for Neighbors<'_, E> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|edge| edge.target)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<E> ExactSizeIterator for Neighbors<'_, E> {}
+
 /// Error returned when compact graph construction fails.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BuildError {
@@ -291,6 +311,17 @@ impl<N, E> Graph<N, E> {
         })
     }
 
+    /// Returns outgoing neighbor node IDs for `source`, or `None` if the ID is out of bounds.
+    pub fn neighbors(&self, source: NodeId) -> Option<Neighbors<'_, E>> {
+        let node = self.nodes.get(source.index())?;
+        let start = node.first_edge as usize;
+        let end = start + node.edge_count as usize;
+
+        Some(Neighbors {
+            inner: self.edges[start..end].iter(),
+        })
+    }
+
     /// Returns the out-degree for `source`, or `None` if the ID is out of bounds.
     pub fn out_degree(&self, source: NodeId) -> Option<usize> {
         self.nodes
@@ -389,7 +420,50 @@ mod tests {
 
         assert_eq!(graph.node_data(NodeId::new(2)), None);
         assert!(graph.edges_from(NodeId::new(2)).is_none());
+        assert!(graph.neighbors(NodeId::new(2)).is_none());
         assert_eq!(graph.out_degree(NodeId::new(2)), None);
+    }
+
+    #[test]
+    fn neighbors_should_return_outgoing_targets_only() {
+        let graph = Graph::from_edges(
+            vec![(), (), ()],
+            [
+                (NodeId::new(2), NodeId::new(0), "c-a"),
+                (NodeId::new(0), NodeId::new(1), "a-b"),
+                (NodeId::new(0), NodeId::new(2), "a-c"),
+            ],
+        )
+        .unwrap();
+
+        let neighbors: Vec<_> = graph.neighbors(NodeId::new(0)).unwrap().collect();
+
+        assert_eq!(neighbors, [NodeId::new(1), NodeId::new(2)]);
+    }
+
+    #[test]
+    fn neighbors_should_support_empty_outgoing_ranges() {
+        let graph = Graph::<_, ()>::from_edges(vec!["a", "b"], []).unwrap();
+        let neighbors = graph.neighbors(NodeId::new(1)).unwrap();
+
+        assert_eq!(neighbors.len(), 0);
+    }
+
+    #[test]
+    fn neighbors_should_report_exact_remaining_length() {
+        let graph = Graph::from_edges(
+            vec![(), (), ()],
+            [
+                (NodeId::new(0), NodeId::new(1), ()),
+                (NodeId::new(0), NodeId::new(2), ()),
+            ],
+        )
+        .unwrap();
+        let mut neighbors = graph.neighbors(NodeId::new(0)).unwrap();
+
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors.next(), Some(NodeId::new(1)));
+        assert_eq!(neighbors.len(), 1);
     }
 
     #[test]
