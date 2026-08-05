@@ -23,6 +23,10 @@ let graph = builder.build()?;
 for edge in graph.edges_from(a).unwrap() {
     println!("target={:?}, weight={}", edge.target(), edge.data());
 }
+
+for neighbor in graph.neighbors(a).unwrap() {
+    println!("neighbor={neighbor:?}");
+}
 # Ok::<(), palmcds::BuildError>(())
 ```
 
@@ -36,6 +40,7 @@ PalmCDS separates graph construction from graph traversal:
 - `Graph<N, E>` is immutable. `build()` consumes the builder and compacts the graph into CSR layout.
 - `NodeId` is a compact `u32` index. Public accessors return `Option` for out-of-bounds IDs.
 - Outgoing edge iteration borrows from contiguous edge storage and does not allocate.
+- Neighbor iteration yields only target `NodeId`s for algorithms that do not need edge payloads.
 
 ## Status
 
@@ -46,11 +51,11 @@ Implemented:
 - Compact `u32` `NodeId`
 - Generic node and edge payloads
 - Zero-allocation outgoing edge iteration
+- Zero-allocation neighbor-only iteration
 - Basic construction validation
 
 Planned next:
 
-- Neighbor-only traversal
 - BFS and DFS utilities
 - Locality-preserving graph reordering
 - Benchmarks against common Rust graph layouts
