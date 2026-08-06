@@ -27,6 +27,9 @@ for edge in graph.edges_from(a).unwrap() {
 for neighbor in graph.neighbors(a).unwrap() {
     println!("neighbor={neighbor:?}");
 }
+
+let bfs_order: Vec<_> = graph.bfs(a).unwrap().collect();
+let dfs_order: Vec<_> = graph.dfs(a).unwrap().collect();
 # Ok::<(), palmcds::BuildError>(())
 ```
 
@@ -41,6 +44,7 @@ PalmCDS separates graph construction from graph traversal:
 - `NodeId` is a compact `u32` index. Public accessors return `Option` for out-of-bounds IDs.
 - Outgoing edge iteration borrows from contiguous edge storage and does not allocate.
 - Neighbor iteration yields only target `NodeId`s for algorithms that do not need edge payloads.
+- BFS and DFS traversals borrow the graph and keep traversal state outside the graph storage.
 
 ## Status
 
@@ -52,10 +56,10 @@ Implemented:
 - Generic node and edge payloads
 - Zero-allocation outgoing edge iteration
 - Zero-allocation neighbor-only iteration
+- BFS and DFS traversal utilities
 - Basic construction validation
 
 Planned next:
 
-- BFS and DFS utilities
 - Locality-preserving graph reordering
 - Benchmarks against common Rust graph layouts

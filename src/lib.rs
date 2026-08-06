@@ -1,6 +1,7 @@
 //! Cache-conscious graph data structures.
 
 use core::fmt;
+use std::collections::VecDeque;
 
 /// Stable identifier for a node in a [`Graph`].
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -107,7 +108,69 @@ impl<E> Iterator for Neighbors<'_, E> {
     }
 }
 
+impl<E> DoubleEndedIterator for Neighbors<'_, E> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(|edge| edge.target)
+    }
+}
+
 impl<E> ExactSizeIterator for Neighbors<'_, E> {}
+
+/// Breadth-first traversal over reachable node IDs.
+#[derive(Clone, Debug)]
+pub struct Bfs<'a, N, E> {
+    graph: &'a Graph<N, E>,
+    visited: Vec<bool>,
+    queue: VecDeque<NodeId>,
+}
+
+impl<N, E> Iterator for Bfs<'_, N, E> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = self.queue.pop_front()?;
+
+        if let Some(neighbors) = self.graph.neighbors(node) {
+            for neighbor in neighbors {
+                let index = neighbor.index();
+                if !self.visited[index] {
+                    self.visited[index] = true;
+                    self.queue.push_back(neighbor);
+                }
+            }
+        }
+
+        Some(node)
+    }
+}
+
+/// Depth-first traversal over reachable node IDs.
+#[derive(Clone, Debug)]
+pub struct Dfs<'a, N, E> {
+    graph: &'a Graph<N, E>,
+    visited: Vec<bool>,
+    stack: Vec<NodeId>,
+}
+
+impl<N, E> Iterator for Dfs<'_, N, E> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = self.stack.pop()?;
+
+        if let Some(neighbors) = self.graph.neighbors(node) {
+            for neighbor in neighbors.rev() {
+                let index = neighbor.index();
+                if !self.visited[index] {
+                    self.visited[index] = true;
+                    self.stack.push(neighbor);
+                }
+            }
+        }
+
+        Some(node)
+    }
+}
 
 /// Error returned when compact graph construction fails.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -322,6 +385,37 @@ impl<N, E> Graph<N, E> {
         })
     }
 
+    /// Returns a breadth-first traversal starting at `start`.
+    pub fn bfs(&self, start: NodeId) -> Option<Bfs<'_, N, E>> {
+        self.nodes.get(start.index())?;
+
+        let mut visited = vec![false; self.nodes.len()];
+        visited[start.index()] = true;
+
+        let mut queue = VecDeque::new();
+        queue.push_back(start);
+
+        Some(Bfs {
+            graph: self,
+            visited,
+            queue,
+        })
+    }
+
+    /// Returns a depth-first traversal starting at `start`.
+    pub fn dfs(&self, start: NodeId) -> Option<Dfs<'_, N, E>> {
+        self.nodes.get(start.index())?;
+
+        let mut visited = vec![false; self.nodes.len()];
+        visited[start.index()] = true;
+
+        Some(Dfs {
+            graph: self,
+            visited,
+            stack: vec![start],
+        })
+    }
+
     /// Returns the out-degree for `source`, or `None` if the ID is out of bounds.
     pub fn out_degree(&self, source: NodeId) -> Option<usize> {
         self.nodes
@@ -464,6 +558,95 @@ mod tests {
         assert_eq!(neighbors.len(), 2);
         assert_eq!(neighbors.next(), Some(NodeId::new(1)));
         assert_eq!(neighbors.len(), 1);
+    }
+
+    #[test]
+    fn bfs_should_visit_reachable_nodes_by_level() {
+        let graph = Graph::from_edges(
+            vec![(), (), (), ()],
+            [
+                (NodeId::new(0), NodeId::new(1), ()),
+                (NodeId::new(0), NodeId::new(2), ()),
+                (NodeId::new(1), NodeId::new(3), ()),
+                (NodeId::new(2), NodeId::new(3), ()),
+            ],
+        )
+        .unwrap();
+
+        let visited: Vec<_> = graph.bfs(NodeId::new(0)).unwrap().collect();
+
+        assert_eq!(
+            visited,
+            [
+                NodeId::new(0),
+                NodeId::new(1),
+                NodeId::new(2),
+                NodeId::new(3)
+            ]
+        );
+    }
+
+    #[test]
+    fn dfs_should_visit_reachable_nodes_depth_first() {
+        let graph = Graph::from_edges(
+            vec![(), (), (), ()],
+            [
+                (NodeId::new(0), NodeId::new(1), ()),
+                (NodeId::new(0), NodeId::new(2), ()),
+                (NodeId::new(1), NodeId::new(3), ()),
+                (NodeId::new(2), NodeId::new(3), ()),
+            ],
+        )
+        .unwrap();
+
+        let visited: Vec<_> = graph.dfs(NodeId::new(0)).unwrap().collect();
+
+        assert_eq!(
+            visited,
+            [
+                NodeId::new(0),
+                NodeId::new(1),
+                NodeId::new(3),
+                NodeId::new(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn traversals_should_not_repeat_nodes_in_cycles() {
+        let graph = Graph::from_edges(
+            vec![(), (), ()],
+            [
+                (NodeId::new(0), NodeId::new(1), ()),
+                (NodeId::new(1), NodeId::new(2), ()),
+                (NodeId::new(2), NodeId::new(0), ()),
+                (NodeId::new(2), NodeId::new(2), ()),
+            ],
+        )
+        .unwrap();
+
+        let visited: Vec<_> = graph.bfs(NodeId::new(0)).unwrap().collect();
+
+        assert_eq!(visited, [NodeId::new(0), NodeId::new(1), NodeId::new(2)]);
+    }
+
+    #[test]
+    fn traversals_should_skip_disconnected_nodes() {
+        let graph =
+            Graph::<_, ()>::from_edges(vec!["a", "b", "c"], [(NodeId::new(0), NodeId::new(1), ())])
+                .unwrap();
+
+        let visited: Vec<_> = graph.bfs(NodeId::new(0)).unwrap().collect();
+
+        assert_eq!(visited, [NodeId::new(0), NodeId::new(1)]);
+    }
+
+    #[test]
+    fn traversals_should_return_none_for_invalid_start_ids() {
+        let graph = Graph::<_, ()>::from_edges(vec!["a"], []).unwrap();
+
+        assert!(graph.bfs(NodeId::new(1)).is_none());
+        assert!(graph.dfs(NodeId::new(1)).is_none());
     }
 
     #[test]
