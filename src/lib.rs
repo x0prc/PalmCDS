@@ -205,6 +205,15 @@ impl fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
+/// Node ordering strategy used when compacting or rebuilding a graph.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Reorder {
+    /// Keep node IDs in their current order.
+    None,
+    /// Relabel nodes in breadth-first visitation order from `root`.
+    Bfs { root: NodeId },
+}
+
 /// Mutable builder for an immutable [`Graph`].
 ///
 /// The builder accepts nodes and directed edges in insertion order. Calling
@@ -214,6 +223,7 @@ impl std::error::Error for BuildError {}
 pub struct GraphBuilder<N, E> {
     nodes: Vec<N>,
     edges: Vec<(NodeId, NodeId, E)>,
+    reorder: Reorder,
 }
 
 impl<N, E> GraphBuilder<N, E> {
@@ -222,6 +232,7 @@ impl<N, E> GraphBuilder<N, E> {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
+            reorder: Reorder::None,
         }
     }
 
@@ -230,7 +241,14 @@ impl<N, E> GraphBuilder<N, E> {
         Self {
             nodes: Vec::with_capacity(nodes),
             edges: Vec::with_capacity(edges),
+            reorder: Reorder::None,
         }
+    }
+
+    /// Sets the node reordering strategy to apply during [`build`](Self::build).
+    pub fn reorder(&mut self, reorder: Reorder) -> &mut Self {
+        self.reorder = reorder;
+        self
     }
 
     /// Adds a node payload and returns its stable node ID.
@@ -273,7 +291,7 @@ impl<N, E> GraphBuilder<N, E> {
 
     /// Consumes the builder and returns a compact immutable graph.
     pub fn build(self) -> Result<Graph<N, E>, BuildError> {
-        Graph::from_edges(self.nodes, self.edges)
+        Graph::from_edges(self.nodes, self.edges)?.into_reordered(self.reorder)
     }
 }
 
@@ -341,6 +359,23 @@ impl<N, E> Graph<N, E> {
             nodes: graph_nodes,
             edges: graph_edges,
         })
+    }
+
+    /// Returns a reordered clone of this graph.
+    pub fn reordered(&self, reorder: Reorder) -> Result<Self, BuildError>
+    where
+        N: Clone,
+        E: Clone,
+    {
+        self.clone().into_reordered(reorder)
+    }
+
+    /// Consumes this graph and returns a graph with node IDs relabeled by `reorder`.
+    pub fn into_reordered(self, reorder: Reorder) -> Result<Self, BuildError> {
+        match reorder {
+            Reorder::None => Ok(self),
+            Reorder::Bfs { root } => self.into_bfs_reordered(root),
+        }
     }
 
     /// Returns the number of nodes in the graph.
@@ -421,6 +456,80 @@ impl<N, E> Graph<N, E> {
         self.nodes
             .get(source.index())
             .map(|node| node.edge_count as usize)
+    }
+
+    fn bfs_reorder_order(&self, root: NodeId) -> Result<Vec<NodeId>, BuildError> {
+        validate_node_id(root, self.nodes.len())?;
+
+        let mut visited = vec![false; self.nodes.len()];
+        let mut queue = VecDeque::new();
+        let mut order = Vec::with_capacity(self.nodes.len());
+
+        visited[root.index()] = true;
+        queue.push_back(root);
+
+        while let Some(node) = queue.pop_front() {
+            order.push(node);
+
+            if let Some(neighbors) = self.neighbors(node) {
+                for neighbor in neighbors {
+                    let index = neighbor.index();
+                    if !visited[index] {
+                        visited[index] = true;
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+
+        for (index, is_visited) in visited.iter().enumerate() {
+            if !is_visited {
+                order.push(NodeId::new(index as u32));
+            }
+        }
+
+        Ok(order)
+    }
+
+    fn into_bfs_reordered(self, root: NodeId) -> Result<Self, BuildError> {
+        let order = self.bfs_reorder_order(root)?;
+        self.into_reordered_by_order(order)
+    }
+
+    fn into_reordered_by_order(self, order: Vec<NodeId>) -> Result<Self, BuildError> {
+        let Graph { nodes, edges } = self;
+        let mut old_to_new = vec![NodeId::new(0); nodes.len()];
+
+        for (new_index, old_id) in order.iter().copied().enumerate() {
+            old_to_new[old_id.index()] = NodeId::new(new_index as u32);
+        }
+
+        let mut edge_sources = Vec::with_capacity(edges.len());
+        for (source_index, node) in nodes.iter().enumerate() {
+            for _ in 0..node.edge_count {
+                edge_sources.push(NodeId::new(source_index as u32));
+            }
+        }
+
+        let reordered_edges = edge_sources.into_iter().zip(edges).map(|(source, edge)| {
+            (
+                old_to_new[source.index()],
+                old_to_new[edge.target.index()],
+                edge.data,
+            )
+        });
+
+        let mut old_nodes: Vec<_> = nodes.into_iter().map(Some).collect();
+        let mut reordered_nodes = Vec::with_capacity(old_nodes.len());
+
+        for old_id in order {
+            let node = old_nodes[old_id.index()]
+                .take()
+                .expect("reorder order should contain each node exactly once");
+            reordered_nodes.push(node.data);
+        }
+
+        Graph::from_edges(reordered_nodes, reordered_edges)
     }
 }
 
@@ -647,6 +756,93 @@ mod tests {
 
         assert!(graph.bfs(NodeId::new(1)).is_none());
         assert!(graph.dfs(NodeId::new(1)).is_none());
+    }
+
+    #[test]
+    fn into_reordered_should_relabel_nodes_in_bfs_order() {
+        let graph = Graph::from_edges(
+            vec!["a", "b", "c", "d"],
+            [
+                (NodeId::new(2), NodeId::new(0), ()),
+                (NodeId::new(0), NodeId::new(1), ()),
+            ],
+        )
+        .unwrap()
+        .into_reordered(Reorder::Bfs {
+            root: NodeId::new(2),
+        })
+        .unwrap();
+
+        assert_eq!(graph.node_data(NodeId::new(0)), Some(&"c"));
+        assert_eq!(graph.node_data(NodeId::new(1)), Some(&"a"));
+        assert_eq!(graph.node_data(NodeId::new(2)), Some(&"b"));
+        assert_eq!(graph.node_data(NodeId::new(3)), Some(&"d"));
+        assert_eq!(
+            graph.neighbors(NodeId::new(0)).unwrap().collect::<Vec<_>>(),
+            [NodeId::new(1)]
+        );
+    }
+
+    #[test]
+    fn reordered_should_clone_without_changing_original_graph() {
+        let graph =
+            Graph::from_edges(vec!["a", "b", "c"], [(NodeId::new(2), NodeId::new(0), ())]).unwrap();
+
+        let reordered = graph
+            .reordered(Reorder::Bfs {
+                root: NodeId::new(2),
+            })
+            .unwrap();
+
+        assert_eq!(graph.node_data(NodeId::new(0)), Some(&"a"));
+        assert_eq!(reordered.node_data(NodeId::new(0)), Some(&"c"));
+    }
+
+    #[test]
+    fn builder_should_apply_configured_reorder_during_build() {
+        let mut builder = GraphBuilder::<_, ()>::new();
+        let a = builder.add_node("a").unwrap();
+        let b = builder.add_node("b").unwrap();
+        let c = builder.add_node("c").unwrap();
+
+        builder.add_edge(c, a, ()).unwrap();
+        builder.add_edge(a, b, ()).unwrap();
+        builder.reorder(Reorder::Bfs { root: c });
+
+        let graph = builder.build().unwrap();
+
+        assert_eq!(graph.node_data(NodeId::new(0)), Some(&"c"));
+        assert_eq!(graph.node_data(NodeId::new(1)), Some(&"a"));
+        assert_eq!(graph.node_data(NodeId::new(2)), Some(&"b"));
+    }
+
+    #[test]
+    fn reorder_none_should_keep_node_order() {
+        let graph = Graph::<_, ()>::from_edges(vec!["a", "b"], [])
+            .unwrap()
+            .into_reordered(Reorder::None)
+            .unwrap();
+
+        assert_eq!(graph.node_data(NodeId::new(0)), Some(&"a"));
+        assert_eq!(graph.node_data(NodeId::new(1)), Some(&"b"));
+    }
+
+    #[test]
+    fn reordering_should_reject_invalid_roots() {
+        let err = Graph::<_, ()>::from_edges(vec!["a"], [])
+            .unwrap()
+            .into_reordered(Reorder::Bfs {
+                root: NodeId::new(1),
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            BuildError::InvalidNodeId {
+                id: NodeId::new(1),
+                node_count: 1,
+            }
+        );
     }
 
     #[test]
