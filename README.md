@@ -7,7 +7,7 @@ CSR keeps nodes in one contiguous arena and stores each node's outgoing edges in
 ## Current API
 
 ```rust
-use palmcds::Graph;
+use palmcds::{Graph, Reorder};
 
 let mut builder = Graph::builder();
 
@@ -17,6 +17,7 @@ let c = builder.add_node("c")?;
 
 builder.add_edge(a, b, 10)?;
 builder.add_edge(a, c, 20)?;
+builder.reorder(Reorder::Bfs { root: a });
 
 let graph = builder.build()?;
 
@@ -30,6 +31,8 @@ for neighbor in graph.neighbors(a).unwrap() {
 
 let bfs_order: Vec<_> = graph.bfs(a).unwrap().collect();
 let dfs_order: Vec<_> = graph.dfs(a).unwrap().collect();
+
+let reordered = graph.reordered(Reorder::Bfs { root: a })?;
 # Ok::<(), palmcds::BuildError>(())
 ```
 
@@ -45,6 +48,7 @@ PalmCDS separates graph construction from graph traversal:
 - Outgoing edge iteration borrows from contiguous edge storage and does not allocate.
 - Neighbor iteration yields only target `NodeId`s for algorithms that do not need edge payloads.
 - BFS and DFS traversals borrow the graph and keep traversal state outside the graph storage.
+- `Reorder::Bfs` relabels nodes into breadth-first order from a root, then appends disconnected nodes in original order.
 
 ## Status
 
@@ -57,9 +61,29 @@ Implemented:
 - Zero-allocation outgoing edge iteration
 - Zero-allocation neighbor-only iteration
 - BFS and DFS traversal utilities
+- BFS-based locality-preserving reordering
 - Basic construction validation
+- Criterion benchmark suite for traversal and build paths
+
+## Benchmarks
+
+Run benchmarks with:
+
+```bash
+cargo bench
+```
+
+The current suite measures:
+
+- Full neighbor scans over PalmCDS CSR storage
+- Full neighbor scans over a simple `Vec<Vec<NodeId>>` adjacency-list baseline
+- BFS over PalmCDS CSR storage
+- BFS over the adjacency-list baseline
+- Plain graph build time
+- BFS-reordered graph build time
 
 Planned next:
 
-- Locality-preserving graph reordering
-- Benchmarks against common Rust graph layouts
+- Add `petgraph` comparisons
+- Add larger graph shape variants
+- Add memory-footprint reporting
