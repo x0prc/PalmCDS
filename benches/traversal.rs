@@ -5,6 +5,8 @@ use std::collections::VecDeque;
 const NODE_COUNT: usize = 10_000;
 const FANOUT: usize = 4;
 
+// Build a fixed-fanout directed ring. Each node points to the next FANOUT
+// nodes, wrapping at the end, so BFS from node 0 reaches the whole graph.
 fn build_graph() -> Graph<(), ()> {
     let mut builder = GraphBuilder::with_capacity(NODE_COUNT, NODE_COUNT * FANOUT);
     let nodes: Vec<_> = (0..NODE_COUNT)
@@ -21,6 +23,8 @@ fn build_graph() -> Graph<(), ()> {
     builder.build().unwrap()
 }
 
+// Use the same topology as build_graph, but ask PalmCDS to relabel nodes in BFS
+// order during compaction. This isolates the cost and effect of reordering.
 fn build_reordered_graph() -> Graph<(), ()> {
     let mut builder = GraphBuilder::with_capacity(NODE_COUNT, NODE_COUNT * FANOUT);
     let nodes: Vec<_> = (0..NODE_COUNT)
@@ -38,6 +42,8 @@ fn build_reordered_graph() -> Graph<(), ()> {
     builder.build().unwrap()
 }
 
+// Simple adjacency-list baseline. This is not meant to be a full competing
+// graph library; it is the common Vec<Vec<NodeId>> shape many users start with.
 fn build_adjacency_list() -> Vec<Vec<NodeId>> {
     let mut adjacency = (0..NODE_COUNT)
         .map(|_| Vec::with_capacity(FANOUT))
@@ -53,6 +59,8 @@ fn build_adjacency_list() -> Vec<Vec<NodeId>> {
     adjacency
 }
 
+// Scan every outgoing neighbor without touching edge payloads. The checksum
+// prevents the optimizer from deleting the traversal work.
 fn scan_graph_neighbors(graph: &Graph<(), ()>) -> u64 {
     let mut sum = 0;
 
@@ -65,6 +73,7 @@ fn scan_graph_neighbors(graph: &Graph<(), ()>) -> u64 {
     sum
 }
 
+// Same scan as scan_graph_neighbors, but over the adjacency-list baseline.
 fn scan_adjacency_neighbors(adjacency: &[Vec<NodeId>]) -> u64 {
     let mut sum = 0;
 
@@ -77,6 +86,8 @@ fn scan_adjacency_neighbors(adjacency: &[Vec<NodeId>]) -> u64 {
     sum
 }
 
+// Baseline BFS implemented with the same visited-on-enqueue behavior as
+// PalmCDS's Bfs iterator, so traversal semantics are comparable.
 fn bfs_adjacency(adjacency: &[Vec<NodeId>], start: NodeId) -> u64 {
     let mut visited = vec![false; adjacency.len()];
     let mut queue = VecDeque::new();
@@ -101,6 +112,8 @@ fn bfs_adjacency(adjacency: &[Vec<NodeId>], start: NodeId) -> u64 {
 }
 
 fn traversal_benchmarks(c: &mut Criterion) {
+    // Build inputs once per benchmark group so these measurements focus on
+    // traversal cost rather than setup cost.
     let graph = build_graph();
     let reordered_graph = build_reordered_graph();
     let adjacency = build_adjacency_list();
@@ -145,6 +158,8 @@ fn traversal_benchmarks(c: &mut Criterion) {
 }
 
 fn build_benchmarks(c: &mut Criterion) {
+    // These benchmarks intentionally include construction and compaction. The
+    // reordered variant also includes the BFS relabeling pass.
     c.bench_function("palmcds build", |b| b.iter(|| black_box(build_graph())));
 
     c.bench_function("palmcds build reordered", |b| {

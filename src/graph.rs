@@ -8,7 +8,11 @@ use crate::{Bfs, BuildError, Dfs, GraphBuilder, NodeId};
 /// compared to pointer-heavy graph layouts.
 #[derive(Clone, Debug)]
 pub struct Graph<N, E> {
+    // CSR header storage. Each node records where its outgoing edge range
+    // starts inside `edges` and how many entries belong to that range.
     pub(crate) nodes: Vec<Node<N>>,
+    // Flat edge arena. Edges for the same source node are stored next to each
+    // other, which is the main locality benefit of this representation.
     pub(crate) edges: Vec<Edge<E>>,
 }
 
@@ -47,6 +51,8 @@ impl<'a, E> EdgeRef<'a, E> {
 /// Iterator over the outgoing edges for a node.
 #[derive(Clone, Debug)]
 pub struct Edges<'a, E> {
+    // This borrows a precomputed contiguous slice from the graph's edge arena;
+    // advancing the iterator does not allocate or chase per-node heap objects.
     pub(crate) inner: core::slice::Iter<'a, Edge<E>>,
 }
 
@@ -70,6 +76,8 @@ impl<E> ExactSizeIterator for Edges<'_, E> {}
 /// Iterator over outgoing neighbor node IDs.
 #[derive(Clone, Debug)]
 pub struct Neighbors<'a, E> {
+    // Same backing range as Edges, but yields only targets. Traversal algorithms
+    // can avoid touching edge payloads when they only need topology.
     pub(crate) inner: core::slice::Iter<'a, Edge<E>>,
 }
 
@@ -123,6 +131,8 @@ impl<N, E> Graph<N, E> {
             validate_node_id(*target, node_count)?;
         }
 
+        // Group by source so every node can point at a single contiguous range
+        // in `graph_edges`. This is the CSR compaction step.
         edges.sort_by_key(|(source, _, _)| *source);
 
         let mut graph_nodes: Vec<_> = nodes
@@ -139,6 +149,8 @@ impl<N, E> Graph<N, E> {
             let source_index = source.index();
             let node = &mut graph_nodes[source_index];
 
+            // The first edge we see for a source records the start of that
+            // source's range. Later edges only extend the range length.
             if node.edge_count == 0 {
                 node.first_edge = graph_edges.len() as u32;
             }
@@ -176,6 +188,8 @@ impl<N, E> Graph<N, E> {
     /// Returns outgoing edges for `source`, or `None` if the ID is out of bounds.
     pub fn edges_from(&self, source: NodeId) -> Option<Edges<'_, E>> {
         let node = self.nodes.get(source.index())?;
+        // `first_edge..first_edge + edge_count` is valid because from_edges only
+        // creates ranges while pushing into the same edge arena.
         let start = node.first_edge as usize;
         let end = start + node.edge_count as usize;
 
@@ -187,6 +201,8 @@ impl<N, E> Graph<N, E> {
     /// Returns outgoing neighbor node IDs for `source`, or `None` if the ID is out of bounds.
     pub fn neighbors(&self, source: NodeId) -> Option<Neighbors<'_, E>> {
         let node = self.nodes.get(source.index())?;
+        // Neighbor iteration deliberately reuses the exact CSR slice used by
+        // edges_from, but maps each edge down to its target NodeId.
         let start = node.first_edge as usize;
         let end = start + node.edge_count as usize;
 
