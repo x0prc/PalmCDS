@@ -83,6 +83,40 @@ fn accessors_should_return_none_for_invalid_node_ids() {
 }
 
 #[test]
+fn storage_bytes_should_report_allocated_csr_arenas() {
+    let graph = Graph::from_edges(
+        vec![1_u32, 2, 3],
+        [
+            (NodeId::new(0), NodeId::new(1), 10_u64),
+            (NodeId::new(0), NodeId::new(2), 20),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        graph.node_storage_bytes(),
+        3 * Graph::<u32, u64>::node_entry_size()
+    );
+    assert_eq!(
+        graph.edge_storage_bytes(),
+        2 * Graph::<u32, u64>::edge_entry_size()
+    );
+    assert_eq!(
+        graph.total_storage_bytes(),
+        graph.node_storage_bytes() + graph.edge_storage_bytes()
+    );
+}
+
+#[test]
+fn storage_bytes_should_support_empty_graphs() {
+    let graph = Graph::<(), ()>::from_edges(Vec::new(), []).unwrap();
+
+    assert_eq!(graph.node_storage_bytes(), 0);
+    assert_eq!(graph.edge_storage_bytes(), 0);
+    assert_eq!(graph.total_storage_bytes(), 0);
+}
+
+#[test]
 fn neighbors_should_return_outgoing_targets_only() {
     let graph = Graph::from_edges(
         vec![(), (), ()],

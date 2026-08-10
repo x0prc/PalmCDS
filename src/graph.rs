@@ -1,5 +1,6 @@
 use crate::error::validate_node_id;
 use crate::{Bfs, BuildError, Dfs, GraphBuilder, NodeId};
+use core::mem::size_of;
 
 /// A directed, immutable graph stored in compressed sparse row form.
 ///
@@ -178,6 +179,37 @@ impl<N, E> Graph<N, E> {
     /// Returns true when the graph has no nodes.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Returns the size of one internal node header plus its payload.
+    pub const fn node_entry_size() -> usize {
+        size_of::<Node<N>>()
+    }
+
+    /// Returns the size of one internal edge entry plus its payload.
+    pub const fn edge_entry_size() -> usize {
+        size_of::<Edge<E>>()
+    }
+
+    /// Returns bytes allocated for the node arena.
+    ///
+    /// This is based on vector capacity, not length, so it reflects the storage
+    /// currently owned by the graph. It excludes allocator metadata.
+    pub fn node_storage_bytes(&self) -> usize {
+        self.nodes.capacity() * Self::node_entry_size()
+    }
+
+    /// Returns bytes allocated for the edge arena.
+    ///
+    /// This is based on vector capacity, not length, so it reflects the storage
+    /// currently owned by the graph. It excludes allocator metadata.
+    pub fn edge_storage_bytes(&self) -> usize {
+        self.edges.capacity() * Self::edge_entry_size()
+    }
+
+    /// Returns bytes allocated for the graph's node and edge arenas.
+    pub fn total_storage_bytes(&self) -> usize {
+        self.node_storage_bytes() + self.edge_storage_bytes()
     }
 
     /// Returns the node payload for `id`, or `None` if the ID is out of bounds.

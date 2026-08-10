@@ -33,6 +33,8 @@ let bfs_order: Vec<_> = graph.bfs(a).unwrap().collect();
 let dfs_order: Vec<_> = graph.dfs(a).unwrap().collect();
 
 let reordered = graph.reordered(Reorder::Bfs { root: a })?;
+
+let storage_bytes = graph.total_storage_bytes();
 # Ok::<(), palmcds::BuildError>(())
 ```
 
@@ -49,6 +51,7 @@ PalmCDS separates graph construction from graph traversal:
 - Neighbor iteration yields only target `NodeId`s for algorithms that do not need edge payloads.
 - BFS and DFS traversals borrow the graph and keep traversal state outside the graph storage.
 - `Reorder::Bfs` relabels nodes into breadth-first order from a root, then appends disconnected nodes in original order.
+- Storage footprint methods report bytes owned by the graph's node and edge arenas, excluding allocator metadata.
 
 ## Status
 
@@ -63,6 +66,7 @@ Implemented:
 - BFS and DFS traversal utilities
 - BFS-based locality-preserving reordering
 - Basic construction validation
+- Storage footprint reporting
 - Criterion benchmark suite for traversal and build paths
 
 ## Benchmarks
@@ -86,4 +90,4 @@ Planned next:
 
 - Add `petgraph` comparisons
 - Add larger graph shape variants
-- Add memory-footprint reporting
+- Add memory-footprint benchmark comparisons
