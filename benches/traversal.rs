@@ -1,6 +1,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use palmcds::{Graph, GraphBuilder, NodeId, Reorder};
 use std::collections::VecDeque;
+use std::mem::size_of;
 
 const NODE_COUNT: usize = 10_000;
 const FANOUT: usize = 4;
@@ -57,6 +58,20 @@ fn build_adjacency_list() -> Vec<Vec<NodeId>> {
     }
 
     adjacency
+}
+
+// Estimate the memory owned by the Vec<Vec<NodeId>> baseline. This mirrors
+// Graph::total_storage_bytes by using vector capacity and excluding allocator
+// metadata. The outer Vec capacity is part of the baseline's storage, so this
+// intentionally takes &Vec rather than a slice.
+fn adjacency_storage_bytes(adjacency: &Vec<Vec<NodeId>>) -> usize {
+    let outer_storage = adjacency.capacity() * size_of::<Vec<NodeId>>();
+    let inner_storage = adjacency
+        .iter()
+        .map(|targets| targets.capacity() * size_of::<NodeId>())
+        .sum::<usize>();
+
+    outer_storage + inner_storage
 }
 
 // Scan every outgoing neighbor without touching edge payloads. The checksum
@@ -167,5 +182,30 @@ fn build_benchmarks(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, traversal_benchmarks, build_benchmarks);
+fn footprint_benchmarks(c: &mut Criterion) {
+    let graph = build_graph();
+    let reordered_graph = build_reordered_graph();
+    let adjacency = build_adjacency_list();
+
+    // These benchmarks keep footprint calculations visible in Criterion output
+    // and prevent the comparison helpers from bit-rotting as the layouts evolve.
+    c.bench_function("palmcds footprint bytes", |b| {
+        b.iter(|| black_box(black_box(&graph).total_storage_bytes()))
+    });
+
+    c.bench_function("palmcds reordered footprint bytes", |b| {
+        b.iter(|| black_box(black_box(&reordered_graph).total_storage_bytes()))
+    });
+
+    c.bench_function("vec adjacency footprint bytes", |b| {
+        b.iter(|| black_box(adjacency_storage_bytes(black_box(&adjacency))))
+    });
+}
+
+criterion_group!(
+    benches,
+    traversal_benchmarks,
+    build_benchmarks,
+    footprint_benchmarks
+);
 criterion_main!(benches);
