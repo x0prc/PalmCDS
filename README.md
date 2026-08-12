@@ -85,9 +85,11 @@ The current suite measures:
 - BFS over the adjacency-list baseline
 - Plain graph build time
 - BFS-reordered graph build time
+- PalmCDS CSR storage footprint calculation
+- `Vec<Vec<NodeId>>` adjacency-list storage footprint calculation
 
 Planned next:
 
 - Add `petgraph` comparisons
 - Add larger graph shape variants
-- Add memory-footprint benchmark comparisons
+- Add recorded benchmark result notes
