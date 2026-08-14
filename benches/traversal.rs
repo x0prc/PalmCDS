@@ -1,5 +1,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use palmcds::{Graph, GraphBuilder, NodeId, Reorder};
+use petgraph::Direction;
+use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::VecDeque;
 use std::mem::size_of;
 
@@ -60,6 +62,22 @@ fn build_adjacency_list() -> Vec<Vec<NodeId>> {
     adjacency
 }
 
+// Petgraph comparison using its common adjacency-list graph type. This gives us
+// a reference point against an established Rust graph library on the same shape.
+fn build_petgraph() -> DiGraph<(), ()> {
+    let mut graph = DiGraph::with_capacity(NODE_COUNT, NODE_COUNT * FANOUT);
+    let nodes: Vec<_> = (0..NODE_COUNT).map(|_| graph.add_node(())).collect();
+
+    for source in 0..NODE_COUNT {
+        for offset in 1..=FANOUT {
+            let target = (source + offset) % NODE_COUNT;
+            graph.add_edge(nodes[source], nodes[target], ());
+        }
+    }
+
+    graph
+}
+
 // Estimate the memory owned by the Vec<Vec<NodeId>> baseline. This mirrors
 // Graph::total_storage_bytes by using vector capacity and excluding allocator
 // metadata. The outer Vec capacity is part of the baseline's storage, so this
@@ -101,6 +119,20 @@ fn scan_adjacency_neighbors(adjacency: &[Vec<NodeId>]) -> u64 {
     sum
 }
 
+// Same scan against petgraph. We sum NodeIndex values so the benchmark performs
+// observable work comparable to the PalmCDS and Vec baselines.
+fn scan_petgraph_neighbors(graph: &DiGraph<(), ()>) -> u64 {
+    let mut sum = 0;
+
+    for source in graph.node_indices() {
+        for neighbor in graph.neighbors_directed(source, Direction::Outgoing) {
+            sum += neighbor.index() as u64;
+        }
+    }
+
+    sum
+}
+
 // Baseline BFS implemented with the same visited-on-enqueue behavior as
 // PalmCDS's Bfs iterator, so traversal semantics are comparable.
 fn bfs_adjacency(adjacency: &[Vec<NodeId>], start: NodeId) -> u64 {
@@ -126,12 +158,36 @@ fn bfs_adjacency(adjacency: &[Vec<NodeId>], start: NodeId) -> u64 {
     sum
 }
 
+fn bfs_petgraph(graph: &DiGraph<(), ()>, start: NodeIndex) -> u64 {
+    let mut visited = vec![false; graph.node_count()];
+    let mut queue = VecDeque::new();
+    let mut sum = 0;
+
+    visited[start.index()] = true;
+    queue.push_back(start);
+
+    while let Some(node) = queue.pop_front() {
+        sum += node.index() as u64;
+
+        for neighbor in graph.neighbors_directed(node, Direction::Outgoing) {
+            let index = neighbor.index();
+            if !visited[index] {
+                visited[index] = true;
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    sum
+}
+
 fn traversal_benchmarks(c: &mut Criterion) {
     // Build inputs once per benchmark group so these measurements focus on
     // traversal cost rather than setup cost.
     let graph = build_graph();
     let reordered_graph = build_reordered_graph();
     let adjacency = build_adjacency_list();
+    let petgraph = build_petgraph();
 
     c.bench_function("palmcds full neighbor scan", |b| {
         b.iter(|| black_box(scan_graph_neighbors(black_box(&graph))))
@@ -143,6 +199,10 @@ fn traversal_benchmarks(c: &mut Criterion) {
 
     c.bench_function("vec adjacency full neighbor scan", |b| {
         b.iter(|| black_box(scan_adjacency_neighbors(black_box(&adjacency))))
+    });
+
+    c.bench_function("petgraph full neighbor scan", |b| {
+        b.iter(|| black_box(scan_petgraph_neighbors(black_box(&petgraph))))
     });
 
     c.bench_function("palmcds bfs", |b| {
@@ -169,6 +229,10 @@ fn traversal_benchmarks(c: &mut Criterion) {
 
     c.bench_function("vec adjacency bfs", |b| {
         b.iter(|| black_box(bfs_adjacency(black_box(&adjacency), NodeId::new(0))))
+    });
+
+    c.bench_function("petgraph bfs", |b| {
+        b.iter(|| black_box(bfs_petgraph(black_box(&petgraph), NodeIndex::new(0))))
     });
 }
 
