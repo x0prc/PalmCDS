@@ -4,6 +4,10 @@ use std::mem::size_of;
 const NODE_COUNT: usize = 128;
 const FANOUT: usize = 4;
 
+// Test-only mirror of the benchmark estimator. It accounts for Vec-owned
+// storage: the outer Vec of row headers plus each inner row's target capacity.
+// Allocator bookkeeping is intentionally excluded, matching Graph's footprint
+// methods.
 fn adjacency_storage_bytes(adjacency: &Vec<Vec<NodeId>>) -> usize {
     let outer_storage = adjacency.capacity() * size_of::<Vec<NodeId>>();
     let inner_storage = adjacency
@@ -14,6 +18,8 @@ fn adjacency_storage_bytes(adjacency: &Vec<Vec<NodeId>>) -> usize {
     outer_storage + inner_storage
 }
 
+// Build the same fixed-fanout ring shape used by the benchmarks. Every node has
+// FANOUT outgoing edges, so this is a stable topology for footprint comparison.
 fn build_graph() -> Graph<(), ()> {
     let mut builder = GraphBuilder::with_capacity(NODE_COUNT, NODE_COUNT * FANOUT);
     let nodes: Vec<_> = (0..NODE_COUNT)
@@ -30,6 +36,8 @@ fn build_graph() -> Graph<(), ()> {
     builder.build().unwrap()
 }
 
+// Baseline representation: one heap-backed Vec per node. This is convenient and
+// common, but the per-node row headers add overhead versus PalmCDS's flat arena.
 fn build_adjacency_list() -> Vec<Vec<NodeId>> {
     let mut adjacency = (0..NODE_COUNT)
         .map(|_| Vec::with_capacity(FANOUT))
@@ -57,6 +65,7 @@ fn adjacency_storage_bytes_should_include_outer_and_inner_capacity() {
 
     assert_eq!(
         adjacency_storage_bytes(&adjacency),
+        // Outer capacity is two Vec headers; inner capacities are 3 + 5 NodeIds.
         2 * size_of::<Vec<NodeId>>() + 8 * size_of::<NodeId>()
     );
 }

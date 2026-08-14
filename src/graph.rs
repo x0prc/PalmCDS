@@ -20,7 +20,10 @@ pub struct Graph<N, E> {
 #[derive(Clone, Debug)]
 pub(crate) struct Node<N> {
     pub(crate) data: N,
+    // Offset into Graph::edges for this node's first outgoing edge.
+    // Nodes with no outgoing edges keep the default 0 and edge_count 0.
     pub(crate) first_edge: u32,
+    // Number of edges in this node's contiguous outgoing range.
     pub(crate) edge_count: u32,
 }
 
@@ -144,6 +147,9 @@ impl<N, E> Graph<N, E> {
                 edge_count: 0,
             })
             .collect();
+        // Preallocate exactly the final edge count. The graph is immutable after
+        // construction, so retaining extra edge capacity would only skew storage
+        // reporting and waste memory.
         let mut graph_edges = Vec::with_capacity(edges.len());
 
         for (source, target, data) in edges {
@@ -182,11 +188,16 @@ impl<N, E> Graph<N, E> {
     }
 
     /// Returns the size of one internal node header plus its payload.
+    ///
+    /// This includes the node payload `N` and the CSR range metadata stored next
+    /// to it. It does not include the outer `Vec` allocation header.
     pub const fn node_entry_size() -> usize {
         size_of::<Node<N>>()
     }
 
     /// Returns the size of one internal edge entry plus its payload.
+    ///
+    /// This includes the target `NodeId` and edge payload `E`.
     pub const fn edge_entry_size() -> usize {
         size_of::<Edge<E>>()
     }
