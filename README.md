@@ -81,8 +81,10 @@ The current suite measures:
 
 - Full neighbor scans over PalmCDS CSR storage
 - Full neighbor scans over a simple `Vec<Vec<NodeId>>` adjacency-list baseline
+- Full neighbor scans over `petgraph::DiGraph`
 - BFS over PalmCDS CSR storage
 - BFS over the adjacency-list baseline
+- BFS over `petgraph::DiGraph`
 - Plain graph build time
 - BFS-reordered graph build time
 - PalmCDS CSR storage footprint calculation
@@ -90,6 +92,5 @@ The current suite measures:
 
 Planned next:
 
-- Add `petgraph` comparisons
 - Add larger graph shape variants
 - Add recorded benchmark result notes
