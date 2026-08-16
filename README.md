@@ -90,7 +90,13 @@ The current suite measures:
 - PalmCDS CSR storage footprint calculation
 - `Vec<Vec<NodeId>>` adjacency-list storage footprint calculation
 
+Benchmark graph shapes:
+
+- Chain
+- Fixed-fanout ring
+- 2D grid
+- Deterministic permuted fanout
+
 Planned next:
 
-- Add larger graph shape variants
 - Add recorded benchmark result notes
