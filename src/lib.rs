@@ -5,6 +5,7 @@
 //! traversal: [`GraphBuilder`] is mutable and ergonomic, while [`Graph`] is
 //! compact and read-only once built.
 
+mod algorithms;
 mod builder;
 mod error;
 mod graph;
@@ -12,6 +13,7 @@ mod id;
 mod reorder;
 mod traversal;
 
+pub use algorithms::CycleError;
 pub use builder::GraphBuilder;
 pub use error::BuildError;
 pub use graph::{EdgeRef, Edges, Graph, Neighbors};

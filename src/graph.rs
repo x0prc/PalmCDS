@@ -2,43 +2,47 @@ use crate::error::validate_node_id;
 use crate::{Bfs, BuildError, Dfs, GraphBuilder, NodeId};
 use core::mem::size_of;
 
-/// A directed, immutable graph stored in compressed sparse row form.
+/// A directed, immutable graph stored in compressed sparse row (CSR) form using
+/// Structure-of-Arrays (SoA) edge storage for maximal L1/L2 CPU cache utilization.
 ///
-/// Nodes are stored contiguously, and each node owns one contiguous range of
-/// outgoing edges. This keeps full scans and neighbor traversal cache-friendly
-/// compared to pointer-heavy graph layouts.
+/// Nodes are stored contiguously in `nodes`. Edge targets are stored in a contiguous,
+/// densely-packed `edge_targets` array (`NodeId`s only), allowing neighbor scans,
+/// BFS, DFS, and topological reordering to run at full memory bandwidth without
+/// loading edge payloads `E` into cache lines.
 #[derive(Clone, Debug)]
 pub struct Graph<N, E> {
     // CSR header storage. Each node records where its outgoing edge range
-    // starts inside `edges` and how many entries belong to that range.
+    // starts inside `edge_targets`/`edge_data` and how many entries belong to that range.
     pub(crate) nodes: Vec<Node<N>>,
-    // Flat edge arena. Edges for the same source node are stored next to each
-    // other, which is the main locality benefit of this representation.
-    pub(crate) edges: Vec<Edge<E>>,
+    // Dense contiguous array of edge target IDs (4 bytes each).
+    pub(crate) edge_targets: Vec<NodeId>,
+    // Dense contiguous array of edge payloads.
+    pub(crate) edge_data: Vec<E>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Node<N> {
     pub(crate) data: N,
-    // Offset into Graph::edges for this node's first outgoing edge.
-    // Nodes with no outgoing edges keep the default 0 and edge_count 0.
+    // Offset into edge_targets/edge_data for this node's first outgoing edge.
     pub(crate) first_edge: u32,
     // Number of edges in this node's contiguous outgoing range.
     pub(crate) edge_count: u32,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Edge<E> {
-    pub(crate) target: NodeId,
-    pub(crate) data: E,
-}
-
 /// Borrowed view of one outgoing edge.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct EdgeRef<'a, E> {
     target: NodeId,
     data: &'a E,
 }
+
+impl<E> Clone for EdgeRef<'_, E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E> Copy for EdgeRef<'_, E> {}
 
 impl<'a, E> EdgeRef<'a, E> {
     /// Returns the edge target.
@@ -55,23 +59,21 @@ impl<'a, E> EdgeRef<'a, E> {
 /// Iterator over the outgoing edges for a node.
 #[derive(Clone, Debug)]
 pub struct Edges<'a, E> {
-    // This borrows a precomputed contiguous slice from the graph's edge arena;
-    // advancing the iterator does not allocate or chase per-node heap objects.
-    pub(crate) inner: core::slice::Iter<'a, Edge<E>>,
+    pub(crate) targets: core::slice::Iter<'a, NodeId>,
+    pub(crate) data: core::slice::Iter<'a, E>,
 }
 
 impl<'a, E> Iterator for Edges<'a, E> {
     type Item = EdgeRef<'a, E>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|edge| EdgeRef {
-            target: edge.target,
-            data: &edge.data,
-        })
+        let target = *self.targets.next()?;
+        let data = self.data.next()?;
+        Some(EdgeRef { target, data })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
+        self.targets.size_hint()
     }
 }
 
@@ -79,17 +81,15 @@ impl<E> ExactSizeIterator for Edges<'_, E> {}
 
 /// Iterator over outgoing neighbor node IDs.
 #[derive(Clone, Debug)]
-pub struct Neighbors<'a, E> {
-    // Same backing range as Edges, but yields only targets. Traversal algorithms
-    // can avoid touching edge payloads when they only need topology.
-    pub(crate) inner: core::slice::Iter<'a, Edge<E>>,
+pub struct Neighbors<'a> {
+    pub(crate) inner: core::slice::Iter<'a, NodeId>,
 }
 
-impl<E> Iterator for Neighbors<'_, E> {
+impl Iterator for Neighbors<'_> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|edge| edge.target)
+        self.inner.next().copied()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -97,13 +97,13 @@ impl<E> Iterator for Neighbors<'_, E> {
     }
 }
 
-impl<E> DoubleEndedIterator for Neighbors<'_, E> {
+impl DoubleEndedIterator for Neighbors<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.inner.next_back().map(|edge| edge.target)
+        self.inner.next_back().copied()
     }
 }
 
-impl<E> ExactSizeIterator for Neighbors<'_, E> {}
+impl ExactSizeIterator for Neighbors<'_> {}
 
 impl<N, E> Graph<N, E> {
     /// Creates an empty mutable builder for this graph type.
@@ -114,7 +114,7 @@ impl<N, E> Graph<N, E> {
     /// Builds an immutable directed graph from node payloads and directed edges.
     ///
     /// The input edges are `(source, target, payload)` triples. The resulting
-    /// graph groups outgoing edges by source node into contiguous ranges.
+    /// graph groups outgoing edges by source node into contiguous ranges in CSR format.
     pub fn from_edges(
         nodes: Vec<N>,
         edges: impl IntoIterator<Item = (NodeId, NodeId, E)>,
@@ -135,8 +135,7 @@ impl<N, E> Graph<N, E> {
             validate_node_id(*target, node_count)?;
         }
 
-        // Group by source so every node can point at a single contiguous range
-        // in `graph_edges`. This is the CSR compaction step.
+        // Sort edges by source so every node points to a single contiguous slice.
         edges.sort_by_key(|(source, _, _)| *source);
 
         let mut graph_nodes: Vec<_> = nodes
@@ -147,28 +146,28 @@ impl<N, E> Graph<N, E> {
                 edge_count: 0,
             })
             .collect();
-        // Preallocate exactly the final edge count. The graph is immutable after
-        // construction, so retaining extra edge capacity would only skew storage
-        // reporting and waste memory.
-        let mut graph_edges = Vec::with_capacity(edges.len());
+
+        let edge_count = edges.len();
+        let mut edge_targets = Vec::with_capacity(edge_count);
+        let mut edge_data = Vec::with_capacity(edge_count);
 
         for (source, target, data) in edges {
             let source_index = source.index();
             let node = &mut graph_nodes[source_index];
 
-            // The first edge we see for a source records the start of that
-            // source's range. Later edges only extend the range length.
             if node.edge_count == 0 {
-                node.first_edge = graph_edges.len() as u32;
+                node.first_edge = edge_targets.len() as u32;
             }
 
             node.edge_count += 1;
-            graph_edges.push(Edge { target, data });
+            edge_targets.push(target);
+            edge_data.push(data);
         }
 
         Ok(Self {
             nodes: graph_nodes,
-            edges: graph_edges,
+            edge_targets,
+            edge_data,
         })
     }
 
@@ -179,7 +178,7 @@ impl<N, E> Graph<N, E> {
 
     /// Returns the number of edges in the graph.
     pub fn edge_count(&self) -> usize {
-        self.edges.len()
+        self.edge_targets.len()
     }
 
     /// Returns true when the graph has no nodes.
@@ -188,37 +187,32 @@ impl<N, E> Graph<N, E> {
     }
 
     /// Returns the size of one internal node header plus its payload.
-    ///
-    /// This includes the node payload `N` and the CSR range metadata stored next
-    /// to it. It does not include the outer `Vec` allocation header.
     pub const fn node_entry_size() -> usize {
         size_of::<Node<N>>()
     }
 
-    /// Returns the size of one internal edge entry plus its payload.
-    ///
-    /// This includes the target `NodeId` and edge payload `E`.
-    pub const fn edge_entry_size() -> usize {
-        size_of::<Edge<E>>()
+    /// Returns the size of one internal edge target entry (4 bytes).
+    pub const fn edge_target_size() -> usize {
+        size_of::<NodeId>()
+    }
+
+    /// Returns the size of one edge payload `E`.
+    pub const fn edge_payload_size() -> usize {
+        size_of::<E>()
     }
 
     /// Returns bytes allocated for the node arena.
-    ///
-    /// This is based on vector capacity, not length, so it reflects the storage
-    /// currently owned by the graph. It excludes allocator metadata.
     pub fn node_storage_bytes(&self) -> usize {
         self.nodes.capacity() * Self::node_entry_size()
     }
 
-    /// Returns bytes allocated for the edge arena.
-    ///
-    /// This is based on vector capacity, not length, so it reflects the storage
-    /// currently owned by the graph. It excludes allocator metadata.
+    /// Returns bytes allocated for the edge target and payload arenas.
     pub fn edge_storage_bytes(&self) -> usize {
-        self.edges.capacity() * Self::edge_entry_size()
+        self.edge_targets.capacity() * Self::edge_target_size()
+            + self.edge_data.capacity() * Self::edge_payload_size()
     }
 
-    /// Returns bytes allocated for the graph's node and edge arenas.
+    /// Returns total bytes allocated across all graph arenas.
     pub fn total_storage_bytes(&self) -> usize {
         self.node_storage_bytes() + self.edge_storage_bytes()
     }
@@ -231,26 +225,23 @@ impl<N, E> Graph<N, E> {
     /// Returns outgoing edges for `source`, or `None` if the ID is out of bounds.
     pub fn edges_from(&self, source: NodeId) -> Option<Edges<'_, E>> {
         let node = self.nodes.get(source.index())?;
-        // `first_edge..first_edge + edge_count` is valid because from_edges only
-        // creates ranges while pushing into the same edge arena.
         let start = node.first_edge as usize;
         let end = start + node.edge_count as usize;
 
         Some(Edges {
-            inner: self.edges[start..end].iter(),
+            targets: self.edge_targets[start..end].iter(),
+            data: self.edge_data[start..end].iter(),
         })
     }
 
     /// Returns outgoing neighbor node IDs for `source`, or `None` if the ID is out of bounds.
-    pub fn neighbors(&self, source: NodeId) -> Option<Neighbors<'_, E>> {
+    pub fn neighbors(&self, source: NodeId) -> Option<Neighbors<'_>> {
         let node = self.nodes.get(source.index())?;
-        // Neighbor iteration deliberately reuses the exact CSR slice used by
-        // edges_from, but maps each edge down to its target NodeId.
         let start = node.first_edge as usize;
         let end = start + node.edge_count as usize;
 
         Some(Neighbors {
-            inner: self.edges[start..end].iter(),
+            inner: self.edge_targets[start..end].iter(),
         })
     }
 
