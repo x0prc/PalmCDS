@@ -1,5 +1,7 @@
 # PalmCDS
 
+[![CI](https://github.com/x0prc/PalmCDS/actions/workflows/ci.yml/badge.svg)](https://github.com/x0prc/PalmCDS/actions/workflows/ci.yml)
+
 Cache-conscious data structures for locality-sensitive workloads. Currently provides an immutable directed graph stored in compressed sparse row (CSR) form with Structure-of-Arrays (SoA) edge storage.
 
 ## Structure
