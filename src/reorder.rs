@@ -257,9 +257,8 @@ impl<N, E> Graph<N, E> {
                     order.push(node);
 
                     if let Some(neighbors) = self.neighbors(node) {
-                        let mut unvisited_neighbors: Vec<NodeId> = neighbors
-                            .filter(|nbr| !visited[nbr.index()])
-                            .collect();
+                        let mut unvisited_neighbors: Vec<NodeId> =
+                            neighbors.filter(|nbr| !visited[nbr.index()]).collect();
 
                         // Sort unvisited neighbors by degree ascending
                         unvisited_neighbors.sort_by_key(|nbr| degrees[nbr.index()]);
@@ -331,11 +330,7 @@ impl<N, E> Graph<N, E> {
             .zip(edge_targets)
             .zip(edge_data)
             .map(|((source, target), data)| {
-                (
-                    old_to_new[source.index()],
-                    old_to_new[target.index()],
-                    data,
-                )
+                (old_to_new[source.index()], old_to_new[target.index()], data)
             });
 
         let mut old_nodes: Vec<Option<Node<N>>> = nodes.into_iter().map(Some).collect();

@@ -1,102 +1,75 @@
 # PalmCDS
 
-PalmCDS is a Rust library for cache-conscious data structures. The current focus is an immutable, directed graph stored in compressed sparse row (CSR) form.
+Cache-conscious data structures for locality-sensitive workloads. Currently provides an immutable directed graph stored in compressed sparse row (CSR) form with Structure-of-Arrays (SoA) edge storage.
 
-CSR keeps nodes in one contiguous arena and stores each node's outgoing edges in a contiguous range. This avoids pointer-heavy graph layouts and is intended for fast scans and locality-friendly traversal.
+## Structure
 
-## Current API
+```
+src/
+  lib.rs         Crate root. Re-exports public API.
+  graph.rs       Graph<N, E> — immutable CSR graph with SoA edge storage.
+  builder.rs     GraphBuilder<N, E> — mutable builder, compacts into Graph on build.
+  id.rs          NodeId — compact u32 graph node identifier.
+  traversal.rs   Bfs / Dfs — zero-allocation traversal iterators.
+  reorder.rs     Reorder — node ordering strategies (BFS, DFS, RPO, topological, RCM).
+  algorithms.rs  Graph algorithms (topological sort, cycle detection, Dijkstra, SCC).
+  error.rs       BuildError and validation helpers.
+```
+
+## Design
+
+Construction and traversal are separated. `GraphBuilder` collects nodes and edges mutably. Calling `build()` or `from_edges()` compacts everything into an immutable `Graph`. Edge targets and edge payloads are stored in separate contiguous arrays so neighbor scans never pollute L1 cache with irrelevant payload data.
+
+`NodeId` is a `u32` index. All public accessors return `Option` for out-of-bounds IDs.
+
+## Usage
 
 ```rust
 use palmcds::{Graph, Reorder};
 
-let mut builder = Graph::builder();
+let graph = Graph::from_edges(
+    vec!["a", "b", "c"],
+    [
+        (palmcds::NodeId::new(0), palmcds::NodeId::new(1), 10_u64),
+        (palmcds::NodeId::new(0), palmcds::NodeId::new(2), 20),
+    ],
+).unwrap();
 
-let a = builder.add_node("a")?;
-let b = builder.add_node("b")?;
-let c = builder.add_node("c")?;
-
-builder.add_edge(a, b, 10)?;
-builder.add_edge(a, c, 20)?;
-builder.reorder(Reorder::Bfs { root: a });
-
-let graph = builder.build()?;
-
-for edge in graph.edges_from(a).unwrap() {
-    println!("target={:?}, weight={}", edge.target(), edge.data());
+// Iterate edge payloads
+for edge in graph.edges_from(palmcds::NodeId::new(0)).unwrap() {
+    println!("target={:?} weight={}", edge.target(), edge.data());
 }
 
-for neighbor in graph.neighbors(a).unwrap() {
+// Iterate neighbor IDs only
+for neighbor in graph.neighbors(palmcds::NodeId::new(0)).unwrap() {
     println!("neighbor={neighbor:?}");
 }
 
-let bfs_order: Vec<_> = graph.bfs(a).unwrap().collect();
-let dfs_order: Vec<_> = graph.dfs(a).unwrap().collect();
+// Traversal
+let bfs: Vec<_> = graph.bfs(palmcds::NodeId::new(0)).unwrap().collect();
+let dfs: Vec<_> = graph.dfs(palmcds::NodeId::new(0)).unwrap().collect();
 
-let reordered = graph.reordered(Reorder::Bfs { root: a })?;
+// Reordering for cache locality
+let reordered = graph.reordered(Reorder::Bfs { root: palmcds::NodeId::new(0) }).unwrap();
 
-let storage_bytes = graph.total_storage_bytes();
-# Ok::<(), palmcds::BuildError>(())
+// Algorithms
+let order = graph.topological_sort().unwrap();
+let dists = graph.dijkstra(palmcds::NodeId::new(0), |&w| w).unwrap();
 ```
 
-You can also build directly from node payloads and `(source, target, payload)` edge triples with `Graph::from_edges`.
+## Reorder strategies
 
-## Design
+| Variant | Use case |
+|---|---|
+| `Bfs { root }` | Level-order locality from a root |
+| `Dfs { root }` | Stack-local access patterns |
+| `ReversePostOrder { root }` | Dependencies before consumers (DAGs, control flow) |
+| `Topological` | Global topological ordering |
+| `ReverseCuthillMcKee { root }` | Bandwidth reduction, tight neighbor packing |
 
-PalmCDS separates graph construction from graph traversal:
-
-- `GraphBuilder<N, E>` is mutable and ergonomic. It collects node payloads and directed edges in insertion order.
-- `Graph<N, E>` is immutable. `build()` consumes the builder and compacts the graph into CSR layout.
-- `NodeId` is a compact `u32` index. Public accessors return `Option` for out-of-bounds IDs.
-- Outgoing edge iteration borrows from contiguous edge storage and does not allocate.
-- Neighbor iteration yields only target `NodeId`s for algorithms that do not need edge payloads.
-- BFS and DFS traversals borrow the graph and keep traversal state outside the graph storage.
-- `Reorder::Bfs` relabels nodes into breadth-first order from a root, then appends disconnected nodes in original order.
-- Storage footprint methods report bytes owned by the graph's node and edge arenas, excluding allocator metadata.
-
-## Status
-
-Implemented:
-
-- Immutable directed CSR graph
-- `GraphBuilder<N, E>`
-- Compact `u32` `NodeId`
-- Generic node and edge payloads
-- Zero-allocation outgoing edge iteration
-- Zero-allocation neighbor-only iteration
-- BFS and DFS traversal utilities
-- BFS-based locality-preserving reordering
-- Basic construction validation
-- Storage footprint reporting
-- Criterion benchmark suite for traversal and build paths
-
-## Benchmarks
-
-Run benchmarks with:
+## Run
 
 ```bash
+cargo test
 cargo bench
 ```
-
-The current suite measures:
-
-- Full neighbor scans over PalmCDS CSR storage
-- Full neighbor scans over a simple `Vec<Vec<NodeId>>` adjacency-list baseline
-- Full neighbor scans over `petgraph::DiGraph`
-- BFS over PalmCDS CSR storage
-- BFS over the adjacency-list baseline
-- BFS over `petgraph::DiGraph`
-- Plain graph build time
-- BFS-reordered graph build time
-- PalmCDS CSR storage footprint calculation
-- `Vec<Vec<NodeId>>` adjacency-list storage footprint calculation
-
-Benchmark graph shapes:
-
-- Chain
-- Fixed-fanout ring
-- 2D grid
-- Deterministic permuted fanout
-
-Planned next:
-
-- Add recorded benchmark result notes

@@ -25,7 +25,10 @@ struct State {
 impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse for min-heap
-        other.cost.cmp(&self.cost).then_with(|| self.node.cmp(&other.node))
+        other
+            .cost
+            .cmp(&self.cost)
+            .then_with(|| self.node.cmp(&other.node))
     }
 }
 
@@ -107,10 +110,10 @@ impl<N, E> Graph<N, E> {
         });
 
         while let Some(State { cost, node }) = heap.pop() {
-            if let Some(current_dist) = dists[node.index()] {
-                if cost > current_dist {
-                    continue;
-                }
+            if let Some(current_dist) = dists[node.index()]
+                && cost > current_dist
+            {
+                continue;
             }
 
             if let Some(edges) = self.edges_from(node) {

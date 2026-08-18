@@ -99,7 +99,7 @@ fn storage_bytes_should_report_allocated_csr_arenas() {
     );
     assert_eq!(
         graph.edge_storage_bytes(),
-        2 * Graph::<u32, u64>::edge_entry_size()
+        2 * (Graph::<u32, u64>::edge_target_size() + Graph::<u32, u64>::edge_payload_size())
     );
     assert_eq!(
         graph.total_storage_bytes(),
